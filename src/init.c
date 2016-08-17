@@ -621,7 +621,7 @@ void _julia_init(JL_IMAGE_SEARCH rel)
 
     if (!jl_options.image_file) {
         jl_core_module = jl_new_module(jl_symbol("Core"));
-        jl_type_type->name->mt->module = jl_core_module;
+        jl_type_typename->mt->module = jl_core_module;
         jl_top_module = jl_core_module;
         ptls->current_module = jl_core_module;
         jl_init_intrinsic_functions();
@@ -838,7 +838,7 @@ JL_DLLEXPORT void jl_get_system_hooks(void)
     jl_methoderror_type = (jl_datatype_t*)basemod("MethodError");
     jl_loaderror_type = (jl_datatype_t*)basemod("LoadError");
     jl_initerror_type = (jl_datatype_t*)basemod("InitError");
-    jl_complex_type = (jl_datatype_t*)basemod("Complex");
+    jl_complex_type = (jl_unionall_t*)basemod("Complex");
 }
 
 void jl_get_builtins(void)
