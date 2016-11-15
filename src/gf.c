@@ -120,7 +120,7 @@ static int8_t jl_cachearg_offset(jl_methtable_t *mt)
 JL_DLLEXPORT jl_method_instance_t *jl_specializations_get_linfo(jl_method_t *m, jl_value_t *type, jl_svec_t *sparams)
 {
     JL_LOCK(&m->writelock);
-    jl_typemap_entry_t *sf = jl_typemap_assoc_by_type(m->specializations, type, NULL, 2, /*subtype*/0, /*offs*/0);
+    jl_typemap_entry_t *sf = jl_typemap_assoc_by_type(m->specializations, type, NULL, 1, /*subtype*/0, /*offs*/0);
     if (sf && jl_is_method_instance(sf->func.value)) {
         JL_UNLOCK(&m->writelock);
         return (jl_method_instance_t*)sf->func.value;
@@ -136,7 +136,7 @@ JL_DLLEXPORT jl_method_instance_t *jl_specializations_get_linfo(jl_method_t *m, 
 
 JL_DLLEXPORT jl_value_t *jl_specializations_lookup(jl_method_t *m, jl_tupletype_t *type)
 {
-    jl_typemap_entry_t *sf = jl_typemap_assoc_by_type(m->specializations, type, NULL, 2, /*subtype*/0, /*offs*/0);
+    jl_typemap_entry_t *sf = jl_typemap_assoc_by_type(m->specializations, type, NULL, 1, /*subtype*/0, /*offs*/0);
     if (!sf)
         return jl_nothing;
     return sf->func.value;
@@ -348,16 +348,16 @@ static jl_tupletype_t *join_tsig(jl_tupletype_t *tt, jl_tupletype_t *sig)
 
         if (jl_is_type_type(elt)) {
             // if the declared type was not Any or Union{Type, ...},
-            // then the match must been with TypeConstructor or DataType
+            // then the match must been with UnionAll or DataType
             // and the result of matching the type signature
             // needs to be corrected to the leaf type 'kind'
             jl_value_t *kind = jl_typeof(jl_tparam0(elt));
             if (jl_subtype(kind, decl_i)) {
                 if (!jl_subtype((jl_value_t*)jl_type_type, decl_i)) {
-                    // TypeConstructors are problematic because they can be alternate
+                    // UnionAlls are problematic because they can be alternate
                     // representations of any type. If we matched this method because
-                    // it matched the leaf type TypeConstructor, then don't
-                    // cache something different since that doesn't necessarily actually apply
+                    // it matched the leaf type UnionAll, then don't cache something
+                    // different since that doesn't necessarily actually apply.
                     //
                     // similarly, if we matched Type{T<:Any}::DataType,
                     // then we don't want to cache it that way
@@ -509,6 +509,9 @@ JL_DLLEXPORT int jl_is_cacheable_sig(
         // staged functions can't be optimized
         // so assume the caller was intelligent about calling us
         return 1;
+
+    if (!jl_is_datatype(type))
+        return 0;
 
     size_t i, np = jl_nparams(type);
     for (i = 0; i < np; i++) {
@@ -894,7 +897,7 @@ static int check_ambiguous_visitor(jl_typemap_entry_t *oldentry, struct typemap_
     jl_method_t *m = closure->newentry->func.method;
     jl_tupletype_t *sig = oldentry->sig;
     jl_value_t *isect = closure->match.ti;
-    if (sigs_eq(isect, (jl_value_t*)(closure->after ? sig : type), 1)) {
+    if (jl_types_equal(isect, (jl_value_t*)(closure->after ? sig : type))) {
         // we're ok if the new definition is actually the one we just
         // inferred to be required (see issue #3609). ideally this would
         // never happen, since if New ⊓ Old == New then we should have
@@ -1121,8 +1124,6 @@ void JL_NORETURN jl_method_error(jl_function_t *f, jl_value_t **args, size_t na)
     // not reached
 }
 
-jl_datatype_t *jl_wrap_Type(jl_value_t *t);
-
 jl_tupletype_t *arg_type_tuple(jl_value_t **args, size_t nargs)
 {
     jl_tupletype_t *tt;
@@ -1137,7 +1138,11 @@ jl_tupletype_t *arg_type_tuple(jl_value_t **args, size_t nargs)
             else
                 types[i] = jl_typeof(ai);
         }
-        tt = (jl_tupletype_t*)jl_inst_concrete_tupletype_v(types, nargs);
+        // if `ai` has free type vars this will not be a leaf type.
+        // TODO: it would be really nice to only dispatch and cache those as
+        // `jl_typeof(ai)`, but that will require some redesign of the caching
+        // logic.
+        tt = jl_apply_tuple_type_v(types, nargs);
         JL_GC_POP();
     }
     else {
@@ -1150,7 +1155,7 @@ jl_tupletype_t *arg_type_tuple(jl_value_t **args, size_t nargs)
             else
                 jl_svecset(types, i, jl_typeof(ai));
         }
-        tt = (jl_tupletype_t*)jl_inst_concrete_tupletype(types);
+        tt = jl_apply_tuple_type(types);
         JL_GC_POP();
     }
     return tt;
@@ -1273,15 +1278,16 @@ jl_llvm_functions_t jl_compile_for_dispatch(jl_method_instance_t *li)
 jl_method_instance_t *jl_get_specialization1(jl_tupletype_t *types)
 {
     JL_TIMING(METHOD_LOOKUP_COMPILE);
-    assert(jl_nparams(types) > 0);
     if (!jl_is_leaf_type((jl_value_t*)types) || jl_has_free_typevars((jl_value_t*)types))
         return NULL;
-    assert(jl_is_datatype(jl_tparam0(types)));
+
+    jl_value_t *args = jl_unwrap_unionall(types);
+    assert(jl_is_datatype(args));
 
     // make sure exactly 1 method matches (issue #7302).
     int i;
-    for (i = 0; i < jl_nparams(types); i++) {
-        jl_value_t *ti = jl_tparam(types, i);
+    for (i = 0; i < jl_nparams(args); i++) {
+        jl_value_t *ti = jl_tparam(args, i);
         // if one argument type is DataType, multiple Type{} definitions
         // might match. also be conservative with tuples rather than trying
         // to analyze them in detail.
@@ -1293,7 +1299,9 @@ jl_method_instance_t *jl_get_specialization1(jl_tupletype_t *types)
         }
     }
 
-    jl_methtable_t *mt = ((jl_datatype_t*)jl_tparam0(types))->name->mt;
+    jl_datatype_t *dt = jl_first_argument_datatype(types);
+    assert(dt != NULL);
+    jl_methtable_t *mt = dt->name->mt;
     // most of the time sf is rooted in mt, but if the method is staged it may
     // not be the case
     // TODO: the above should be false, but better safe than sorry?
@@ -1875,7 +1883,7 @@ JL_DLLEXPORT jl_value_t *jl_gf_invoke_lookup(jl_datatype_t *types)
 {
     jl_methtable_t *mt = ((jl_datatype_t*)jl_tparam0(types))->name->mt;
     jl_typemap_entry_t *entry = jl_typemap_assoc_by_type(mt->defs, types, /*don't record env*/NULL,
-            /*exact match*/0, /*subtype*/1, /*offs*/0);
+                                                         0, /*subtype*/1, /*offs*/0);
     if (!entry)
         return jl_nothing;
     return (jl_value_t*)entry;
@@ -2216,11 +2224,9 @@ static jl_value_t *ml_matches(union jl_typemap_t defs, int offs,
 // -1 for no limit.
 JL_DLLEXPORT jl_value_t *jl_matching_methods(jl_tupletype_t *types, int lim, int include_ambiguous)
 {
-    assert(jl_nparams(types) > 0);
-    if (jl_tparam0(types) == jl_bottom_type)
-        return (jl_value_t*)jl_alloc_vec_any(0);
-    assert(jl_is_datatype(jl_tparam0(types)));
-    jl_methtable_t *mt = ((jl_datatype_t*)jl_tparam0(types))->name->mt;
+    jl_datatype_t *dt = jl_first_argument_datatype(types);
+    assert(dt != NULL);
+    jl_methtable_t *mt = dt->name->mt;
     if (mt == NULL)
         return (jl_value_t*)jl_alloc_vec_any(0);
     return ml_matches(mt->defs, 0, types, lim, include_ambiguous);

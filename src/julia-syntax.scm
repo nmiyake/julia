@@ -413,10 +413,9 @@
                   sparams))
          (keyword-sparams
           (filter (lambda (s)
-                    (not (expr-contains-eq (car s) (cons 'list positional-sparams))))
-                  sparams))
-         (keyword-sparam-names
-          (map car keyword-sparams)))
+                    (not (any (lambda (p) (eq? (car p) (car s)))
+                              positional-sparams)))
+                  sparams)))
     (let ((kw (gensy)) (i (gensy)) (ii (gensy)) (elt (gensy))
           (rkw (if (null? restkw) '() (symbol (string (car restkw) "..."))))
           (mangled (symbol (string "#" (if name (undot-name name) 'call) "#"
@@ -490,15 +489,15 @@
                                    (rval0 `(call (core arrayref) ,kw
                                                  (call (top +) ,ii 1)))
                                    ;; note: if the "declared" type of a KW arg
-                                   ;; includes something from keyword-sparam-names,
+                                   ;; includes something from keyword-sparams
                                    ;; then don't assert it here, since those static
                                    ;; parameters don't have values yet.
                                    ;; instead, the type will be picked up when the
                                    ;; underlying method is called.
                                    (rval (if (and (decl? k)
                                                   (not (any (lambda (s)
-                                                              (expr-contains-eq s (caddr k)))
-                                                            keyword-sparam-names)))
+                                                              (expr-contains-eq (car s) (caddr k)))
+                                                            keyword-sparams)))
                                              `(call (core typeassert)
                                                     ,rval0
                                                     ,(caddr k))
