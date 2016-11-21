@@ -338,8 +338,18 @@
                           ,body ,isstaged)
                  `(method ,name
                           (block
-                           ,@(map (lambda (l r) (make-assignment l (replace-vars r renames)))
-                                  temps (map bounds-to-TypeVar sparams))
+                           ,@(let loop ((n       names)
+                                        (t       temps)
+                                        (sp      (map bounds-to-TypeVar sparams))
+                                        (ren     '())
+                                        (assigns '()))
+                               (if (null? n)
+                                   (reverse! assigns)
+                                   (loop (cdr n) (cdr t) (cdr sp)
+                                         (cons (cons (car n) (car t)) ren)
+                                         ;; each static param can see just the previous ones
+                                         (cons (make-assignment (car t) (replace-vars (car sp) ren))
+                                               assigns))))
                            (call (core svec) (call (core svec)
                                                    ,@(dots->vararg
                                                       (map (lambda (ty)
