@@ -1296,7 +1296,7 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
         n += jl_printf(out, "%s", jl_symbol_name(dv->name->name));
         if (dv->parameters && (jl_value_t*)dv != dv->name->wrapper &&
             (jl_has_free_typevars(v) ||
-             !jl_types_equal((jl_value_t*)dv, (jl_value_t*)jl_tuple_type))) {
+             (jl_value_t*)dv != (jl_value_t*)jl_tuple_type)) {
             size_t j, tlen = jl_nparams(dv);
             if (tlen > 0) {
                 n += jl_printf(out, "{");

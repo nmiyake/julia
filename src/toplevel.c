@@ -509,7 +509,7 @@ static jl_method_instance_t *jl_new_thunk(jl_code_info_t *src)
 {
     jl_method_instance_t *li = jl_new_method_instance_uninit();
     li->inferred = (jl_value_t*)src;
-    li->specTypes = (jl_tupletype_t*)jl_typeof(jl_emptytuple);
+    li->specTypes = jl_typeof(jl_emptytuple);
     return li;
 }
 
@@ -787,7 +787,7 @@ JL_DLLEXPORT void jl_method_def(jl_svec_t *argdata,
     jl_methtable_t *mt;
     jl_sym_t *name;
     jl_method_t *m = NULL;
-    jl_tupletype_t *argtype = jl_apply_tuple_type(atypes);
+    jl_value_t *argtype = (jl_value_t*)jl_apply_tuple_type(atypes);
     JL_GC_PUSH3(&f, &m, &argtype);
 
     if (!jl_is_code_info(f)) {
@@ -798,7 +798,7 @@ JL_DLLEXPORT void jl_method_def(jl_svec_t *argdata,
     }
 
     assert(jl_is_code_info(f));
-    jl_datatype_t *ftype = jl_first_argument_datatype((jl_value_t*)argtype);
+    jl_datatype_t *ftype = jl_first_argument_datatype(argtype);
     if (ftype == NULL ||
         !(jl_is_type_type((jl_value_t*)ftype) ||
           (jl_is_datatype(ftype) &&
@@ -819,7 +819,7 @@ JL_DLLEXPORT void jl_method_def(jl_svec_t *argdata,
         argtype = jl_new_struct(jl_unionall_type, tv, argtype);
     }
 
-    m = jl_new_method(f, name, argtype, nargs, isva, tvars, isstaged == jl_true);
+    m = jl_new_method(f, name, (jl_tupletype_t*)argtype, nargs, isva, tvars, isstaged == jl_true);
 
     if (jl_has_free_typevars(argtype)) {
         jl_exceptionf(jl_argumenterror_type,

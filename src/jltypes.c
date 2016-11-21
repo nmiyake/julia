@@ -345,6 +345,17 @@ static int contains_unions(jl_value_t *type)
     return 0;
 }
 
+static intptr_t wrapper_id(jl_value_t *t)
+{
+    // DataType wrappers occur often, e.g. when called as constructors.
+    // make sure any type equal to a wrapper gets a consistent, ordered ID.
+    if (!jl_is_unionall(t)) return 0;
+    jl_value_t *u = jl_unwrap_unionall(t);
+    if (jl_is_datatype(u) && jl_types_equal(((jl_datatype_t*)u)->name->wrapper, t))
+        return ((jl_datatype_t*)u)->name->hash;
+    return 0;
+}
+
 // this function determines whether a type is simple enough to form
 // a total order based on UIDs and object_id.
 static int is_typekey_ordered(jl_value_t **key, size_t n)
@@ -354,9 +365,8 @@ static int is_typekey_ordered(jl_value_t **key, size_t n)
         jl_value_t *k = key[i];
         if (jl_is_typevar(k))
             return 0;
-        if (jl_is_type(k) && k != jl_bottom_type &&
+        if (jl_is_type(k) && k != jl_bottom_type && !wrapper_id(k) &&
             !(jl_is_datatype(k) && (((jl_datatype_t*)k)->uid ||
-                                    //k == ((jl_datatype_t*)k)->name->primary ||
                                     (!jl_has_free_typevars(k) && !contains_unions(k)))))
             return 0;
     }
@@ -374,9 +384,14 @@ static int typekey_compare(jl_datatype_t *tt, jl_value_t **key, size_t n)
     for(j=0; j < n; j++) {
         jl_value_t *kj = key[j], *tj = jl_svecref(tt->parameters,j);
         if (tj != kj) {
+            uint32_t tid=0, kid=0;
             int dtk = jl_is_datatype(kj);
             if (!jl_is_datatype(tj)) {
-                if (!dtk) {
+                tid = wrapper_id(tj);
+                if (tid) {
+                    kid = wrapper_id(kj);
+                }
+                else if (!dtk) {
                     if (jl_egal(tj, kj))
                         continue;
                     return (jl_object_id(kj) < jl_object_id(tj) ? -1 : 1);
@@ -386,15 +401,23 @@ static int typekey_compare(jl_datatype_t *tt, jl_value_t **key, size_t n)
                 }
             }
             else if (!dtk) {
-                return -1;
+                kid = wrapper_id(kj);
+                if (!kid)
+                    return -1;
             }
+            if (tid || kid) {
+                if (kid != tid)
+                    return kid < tid ? -1 : 1;
+                continue;
+            }
+            assert(dtk && jl_is_datatype(tj));
             jl_datatype_t *dt = (jl_datatype_t*)tj;
             jl_datatype_t *dk = (jl_datatype_t*)kj;
             if (dk->uid != dt->uid) {
                 return dk->uid < dt->uid ? -1 : 1;
             }
             else if (dk->uid != 0) {
-                continue;
+                assert(0);
             }
             else if (dk->name->hash != dt->name->hash) {
                 return dk->name->hash < dt->name->hash ? -1 : 1;
@@ -1477,7 +1500,7 @@ static int num_occurs(jl_tvar_t *v, jl_typeenv_t *env)
     jl_typeenv_t *e = env;
     while (e != NULL) {
         if (e->var == v)
-            return (int)e->val;
+            return (int)(ssize_t)e->val;
         e = e->prev;
     }
     return 0;
@@ -1488,13 +1511,13 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
     if (jl_is_unionall(a)) {
         jl_unionall_t *ua = (jl_unionall_t*)a;
         jl_typeenv_t newenv = { ua->var, 0x0, env };
-        newenv.val = (void*)count_occurs(ua->body, ua->var);
+        newenv.val = (jl_value_t*)(intptr_t)count_occurs(ua->body, ua->var);
         return type_morespecific_(ua->body, b, invariant, &newenv);
     }
     if (jl_is_unionall(b)) {
         jl_unionall_t *ub = (jl_unionall_t*)b;
         jl_typeenv_t newenv = { ub->var, 0x0, env };
-        newenv.val = (void*)count_occurs(ub->body, ub->var);
+        newenv.val = (jl_value_t*)(intptr_t)count_occurs(ub->body, ub->var);
         return type_morespecific_(a, ub->body, invariant, &newenv);
     }
     if (a == b) {
@@ -2113,7 +2136,7 @@ void jl_init_types(void)
         jl_new_bitstype((jl_value_t*)jl_symbol("Ptr"),
                         (jl_datatype_t*)jl_apply_type((jl_value_t*)jl_ref_type, jl_svec_data(tv), 1), tv,
                         sizeof(void*)*8)->name->wrapper;
-    jl_pointer_typename = ((jl_datatype_t*)jl_unwrap_unionall(jl_pointer_type))->name;
+    jl_pointer_typename = ((jl_datatype_t*)jl_unwrap_unionall((jl_value_t*)jl_pointer_type))->name;
 
     // U T<:Tuple Type{T}
     tttvar = jl_new_typevar(jl_symbol("T"),

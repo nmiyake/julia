@@ -254,7 +254,7 @@ union jl_typemap_t mtcache_hash_lookup(const struct jl_ordereddict_t *a, jl_valu
         }
         else {
             assert(jl_typeof(ml.unknown) == (jl_value_t*)jl_typemap_entry_type);
-            t = jl_field_type(jl_unwrap_unionall(ml.leaf->sig), offs);
+            t = jl_field_type(jl_unwrap_unionall((jl_value_t*)ml.leaf->sig), offs);
             if (tparam)
                 t = jl_tparam0(t);
         }
@@ -279,7 +279,7 @@ static void mtcache_rehash(struct jl_ordereddict_t *pa, size_t newlen, jl_value_
         }
         else {
             assert(jl_typeof(ml.unknown) == (jl_value_t*)jl_typemap_entry_type);
-            t = jl_field_type(jl_unwrap_unionall(ml.leaf->sig), offs);
+            t = jl_field_type(jl_unwrap_unionall((jl_value_t*)ml.leaf->sig), offs);
             if (tparam)
                 t = jl_tparam0(t);
         }
@@ -357,7 +357,7 @@ static union jl_typemap_t *mtcache_hash_bp(struct jl_ordereddict_t *pa, jl_value
             }
             else {
                 assert(jl_typeof(pml->unknown) == (jl_value_t*)jl_typemap_entry_type);
-                t = jl_field_type(jl_unwrap_unionall(pml->leaf->sig), offs);
+                t = jl_field_type(jl_unwrap_unionall((jl_value_t*)pml->leaf->sig), offs);
                 if (tparam)
                     t = jl_tparam0(t);
             }
@@ -461,7 +461,7 @@ static int jl_typemap_intersection_array_visitor(struct jl_ordereddict_t *a, jl_
             t = ml.node->key;
         }
         else {
-            t = jl_field_type(jl_unwrap_unionall(ml.leaf->sig), offs);
+            t = jl_field_type(jl_unwrap_unionall((jl_value_t*)ml.leaf->sig), offs);
             if (tparam)
                 t = jl_tparam0(t);
         }
@@ -590,7 +590,7 @@ static jl_typemap_entry_t *jl_typemap_assoc_by_type_(jl_typemap_entry_t *ml, jl_
     size_t n = jl_field_count(types);
     int typesisva = n == 0 ? 0 : jl_is_vararg_type(jl_tparam(types, n-1));
     while (ml != (void*)jl_nothing) {
-        size_t lensig = jl_field_count(jl_unwrap_unionall(ml->sig));
+        size_t lensig = jl_field_count(jl_unwrap_unionall((jl_value_t*)ml->sig));
         if (lensig == n || (ml->va && lensig <= n+1)) {
             int resetenv = 0, ismatch = 1;
             if (ml->simplesig != (void*)jl_nothing) {
@@ -694,7 +694,7 @@ jl_typemap_entry_t *jl_typemap_assoc_by_type(union jl_typemap_t ml_or_cache, jl_
         jl_typemap_level_t *cache = ml_or_cache.node;
         // called object is the primary key for constructors, otherwise first argument
         jl_value_t *ty = NULL;
-        jl_value_t *ttypes = jl_unwrap_unionall(types);
+        jl_value_t *ttypes = jl_unwrap_unionall((jl_value_t*)types);
         assert(jl_is_datatype(ttypes));
         size_t l = jl_field_count(ttypes);
         int isva = 0;
@@ -911,7 +911,7 @@ static jl_typemap_level_t *jl_method_convert_list_to_cache(jl_typemap_entry_t *m
 static void jl_typemap_list_insert_(jl_typemap_entry_t **pml, jl_value_t *parent,
                                     jl_typemap_entry_t *newrec, const struct jl_typemap_info *tparams)
 {
-    if (*pml == (void*)jl_nothing || newrec->isleafsig) {
+    if (*pml == (void*)jl_nothing || newrec->isleafsig || (tparams && tparams->unsorted)) {
         newrec->next = *pml;
         jl_gc_wb(newrec, newrec->next);
         *pml = newrec;
@@ -955,7 +955,7 @@ static int jl_typemap_array_insert_(struct jl_ordereddict_t *cache, jl_value_t *
 static void jl_typemap_level_insert_(jl_typemap_level_t *cache, jl_typemap_entry_t *newrec, int8_t offs,
                                      const struct jl_typemap_info *tparams)
 {
-    jl_value_t *ttypes = jl_unwrap_unionall(newrec->sig);
+    jl_value_t *ttypes = jl_unwrap_unionall((jl_value_t*)newrec->sig);
     size_t l = jl_field_count(ttypes);
     // compute the type at offset `offs` into `sig`, which may be a Vararg
     jl_value_t *t1 = NULL;
@@ -1002,7 +1002,7 @@ jl_typemap_entry_t *jl_typemap_insert(union jl_typemap_t *cache, jl_value_t *par
     jl_ptls_t ptls = jl_get_ptls_states();
     if (!simpletype)
         simpletype = (jl_tupletype_t*)jl_nothing;
-    jl_value_t *ttype = jl_unwrap_unionall(type);
+    jl_value_t *ttype = jl_unwrap_unionall((jl_value_t*)type);
 
     if ((jl_value_t*)simpletype == jl_nothing) {
         jl_typemap_entry_t *ml = jl_typemap_assoc_by_type(*cache, type, NULL, 1, 0, offs);
@@ -1018,7 +1018,7 @@ jl_typemap_entry_t *jl_typemap_insert(union jl_typemap_t *cache, jl_value_t *par
             jl_gc_wb(ml, ml->simplesig);
             ml->tvars = tvars;
             jl_gc_wb(ml, ml->tvars);
-            ml->va = jl_is_va_tuple(ttype);
+            ml->va = jl_is_va_tuple((jl_datatype_t*)ttype);
             // TODO: `l->func` or `l->func->roots` might need to be rooted
             ml->func.value = newvalue;
             if (newvalue)
@@ -1040,7 +1040,7 @@ jl_typemap_entry_t *jl_typemap_insert(union jl_typemap_t *cache, jl_value_t *par
     newrec->guardsigs = guardsigs;
     newrec->next = (jl_typemap_entry_t*)jl_nothing;
     // compute the complexity of this type signature
-    newrec->va = jl_is_va_tuple(ttype);
+    newrec->va = jl_is_va_tuple((jl_datatype_t*)ttype);
     newrec->issimplesig = (tvars == jl_emptysvec); // a TypeVar environment needs an complex matching test
     newrec->isleafsig = newrec->issimplesig && !newrec->va; // entirely leaf types don't need to be sorted
     JL_GC_PUSH1(&newrec);
@@ -1112,7 +1112,7 @@ static void jl_typemap_list_insert_sorted(jl_typemap_entry_t **pml, jl_value_t *
     jl_gc_wb(pa, newrec);
     // if this contains Union types, methods after it might actually be
     // more specific than it. we need to re-sort them.
-    if (has_unions(newrec->sig)) {
+    if (has_unions((jl_value_t*)newrec->sig)) {
         jl_value_t *item_parent = (jl_value_t*)newrec;
         jl_value_t *next_parent = 0;
         jl_typemap_entry_t *item = newrec->next, *next;

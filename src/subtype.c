@@ -127,7 +127,12 @@ static void statestack_pop(jl_unionstate_t *st)
     st->stacksize--;
 }
 
-static void save_env(jl_stenv_t *e, jl_value_t **root, int8_t **buf)
+typedef struct {
+    int8_t *buf;
+    int rdepth;
+} jl_savedenv_t;
+
+static void save_env(jl_stenv_t *e, jl_value_t **root, jl_savedenv_t *se)
 {
     jl_varbinding_t *v = e->vars;
     int len=0;
@@ -136,32 +141,32 @@ static void save_env(jl_stenv_t *e, jl_value_t **root, int8_t **buf)
         v = v->prev;
     }
     *root = (jl_value_t*)jl_alloc_svec(len*2);
-    *buf = (int8_t*)malloc(len*2 + sizeof(int));
+    se->buf = (int8_t*)(len ? malloc(len*2) : NULL);
     int i=0; v = e->vars;
     while (v != NULL) {
-        jl_svecset(*root, i, v->lb); (*buf)[i] = v->occurs_inv;
+        jl_svecset(*root, i, v->lb); se->buf[i] = v->occurs_inv;
         i++;
-        jl_svecset(*root, i, v->ub); (*buf)[i] = v->occurs_cov;
+        jl_svecset(*root, i, v->ub); se->buf[i] = v->occurs_cov;
         i++;
         v = v->prev;
     }
-    *(int*)(&(*buf)[i]) = e->Runions.depth;
+    se->rdepth = e->Runions.depth;
 }
 
-static void restore_env(jl_stenv_t *e, jl_value_t *root, int8_t *buf)
+static void restore_env(jl_stenv_t *e, jl_value_t *root, jl_savedenv_t *se)
 {
     jl_varbinding_t *v = e->vars;
     int i = 0;
     while (v != NULL) {
         if (root) v->lb = jl_svecref(root, i);
-        v->occurs_inv = buf[i];
+        v->occurs_inv = se->buf[i];
         i++;
         if (root) v->ub = jl_svecref(root, i);
-        v->occurs_cov = buf[i];
+        v->occurs_cov = se->buf[i];
         i++;
         v = v->prev;
     }
-    e->Runions.depth = *(int*)(&buf[i]);
+    e->Runions.depth = se->rdepth;
 }
 
 // type utilities
@@ -186,14 +191,34 @@ static int obviously_egal(jl_value_t *a, jl_value_t *b)
         return obviously_egal(((jl_uniontype_t*)a)->a, ((jl_uniontype_t*)b)->a) &&
             obviously_egal(((jl_uniontype_t*)a)->b, ((jl_uniontype_t*)b)->b);
     }
-    /* // not clear whether this helps at all
     if (jl_is_unionall(a)) {
         return ((jl_unionall_t*)a)->var == ((jl_unionall_t*)b)->var &&
             obviously_egal(((jl_unionall_t*)a)->body, ((jl_unionall_t*)b)->body);
     }
-    */
     if (jl_is_typevar(a)) return 0;
     return !jl_is_type(a) && jl_egal(a,b);
+}
+
+static int obviously_unequal(jl_value_t *a, jl_value_t *b)
+{
+    if (jl_is_unionall(a)) a = jl_unwrap_unionall(a);
+    if (jl_is_unionall(b)) b = jl_unwrap_unionall(b);
+    if (jl_is_datatype(a) && jl_is_datatype(b)) {
+        jl_datatype_t *ad = (jl_datatype_t*)a, *bd = (jl_datatype_t*)b;
+        if (ad->name != bd->name)
+            return 1;
+        size_t i, np = jl_nparams(ad);
+        if (np != jl_nparams(bd)) return 1;
+        for(i=0; i < np; i++) {
+            if (obviously_unequal(jl_tparam(ad,i), jl_tparam(bd,i)))
+                return 1;
+        }
+    }
+    if (jl_is_long(a) && jl_is_long(b) && jl_unbox_long(a) != jl_unbox_long(b))
+        return 1;
+    if (jl_is_symbol(a) && jl_is_symbol(b) && a != b)
+        return 1;
+    return 0;
 }
 
 static int in_union(jl_value_t *u, jl_value_t *x)
@@ -680,7 +705,7 @@ static int subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int param)
     return x == y || jl_egal(x, y);
 }
 
-static int exists_subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int8_t anyunions, jl_value_t *saved, int8_t *buf)
+static int exists_subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int8_t anyunions, jl_value_t *saved, jl_savedenv_t *se)
 {
     int exists;
     for (exists=0; exists <= anyunions; exists++) {
@@ -703,11 +728,11 @@ static int exists_subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int8_t an
         }
         if (e->Runions.more) {
             statestack_push(&e->Runions, 0);
-            found = exists_subtype(x, y, e, 1, saved, buf);
+            found = exists_subtype(x, y, e, 1, saved, se);
             statestack_pop(&e->Runions);
         }
         else {
-            if (!found) restore_env(e, saved, buf);
+            if (!found) restore_env(e, saved, se);
         }
         if (found) return 1;
     }
@@ -716,30 +741,30 @@ static int exists_subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int8_t an
 
 static int forall_exists_subtype(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int8_t anyunions)
 {
-    jl_value_t *saved=NULL; int8_t *buf;
+    jl_value_t *saved=NULL; jl_savedenv_t se;
     JL_GC_PUSH1(&saved);
     int forall;
     for (forall=0; forall <= anyunions; forall++) {
         if (e->Lunions.stacksize > 0)
             statestack_set(&e->Lunions, e->Lunions.stacksize-1, forall);
-        save_env(e, &saved, &buf);
-        if (!exists_subtype(x, y, e, 0, saved, buf)) {
-            free(buf);
+        save_env(e, &saved, &se);
+        if (!exists_subtype(x, y, e, 0, saved, &se)) {
+            free(se.buf);
             JL_GC_POP();
             return 0;
         }
         if (e->Lunions.more) {
-            restore_env(e, saved, buf);
+            restore_env(e, saved, &se);
             statestack_push(&e->Lunions, 0);
             int sub = forall_exists_subtype(x, y, e, 1);
             statestack_pop(&e->Lunions);
             if (!sub) {
-                free(buf);
+                free(se.buf);
                 JL_GC_POP();
                 return 0;
             }
         }
-        free(buf);
+        free(se.buf);
     }
     JL_GC_POP();
     return 1;
@@ -804,8 +829,8 @@ JL_DLLEXPORT int jl_subtype(jl_value_t *x, jl_value_t *y)
 
 JL_DLLEXPORT int jl_types_equal(jl_value_t *a, jl_value_t *b)
 {
-    if (obviously_egal(a, b))
-        return 1;
+    if (obviously_egal(a, b))    return 1;
+    if (obviously_unequal(a, b)) return 0;
     return jl_subtype(a, b) && jl_subtype(b, a);
 }
 
@@ -834,7 +859,7 @@ JL_DLLEXPORT int jl_isa(jl_value_t *x, jl_value_t *t)
                 return 0;
             }
             JL_GC_PUSH1(&x);
-            x = (jl_value_t*)jl_wrap_Type(x);
+            x = (jl_value_t*)jl_wrap_Type(x);  // TODO jb/subtype avoid jl_wrap_Type
             int ans = jl_subtype(x, t);
             JL_GC_POP();
             return ans;
@@ -852,13 +877,13 @@ static jl_value_t *intersect(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int pa
 static jl_value_t *intersect_union(jl_value_t *x, jl_uniontype_t *u, jl_stenv_t *e, int8_t R, int param)
 {
     if (param == 2) {
-        jl_value_t *a=NULL, *b=NULL, *save=NULL; int8_t *buf;
+        jl_value_t *a=NULL, *b=NULL, *save=NULL; jl_savedenv_t se;
         JL_GC_PUSH3(&a, &b, &save);
-        save_env(e, &save, &buf);
+        save_env(e, &save, &se);
         a = R ? intersect(x, u->a, e, param) : intersect(u->a, x, e, param);
-        restore_env(e, NULL, buf);
+        restore_env(e, NULL, &se);
         b = R ? intersect(x, u->b, e, param) : intersect(u->b, x, e, param);
-        free(buf);
+        free(se.buf);
         jl_value_t *i = simple_join(a,b);
         JL_GC_POP();
         return i;
@@ -961,17 +986,17 @@ static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int
         bb->ub = ub;
         return (jl_value_t*)b;
     }
-    jl_value_t *root; int8_t *buf;
+    jl_value_t *root; jl_savedenv_t se;
     JL_GC_PUSH2(&root, &ub);
-    save_env(e, &root, &buf);
+    save_env(e, &root, &se);
     jl_value_t *ii = R ? intersect_ufirst(a, bb->lb, e, d) : intersect_ufirst(bb->lb, a, e, d);
     if (ii == jl_bottom_type) {
-        restore_env(e, root, buf);
+        restore_env(e, root, &se);
         ii = (jl_value_t*)b;
         if (ub != (jl_value_t*)b)
             bb->ub = ub;
     }
-    free(buf);
+    free(se.buf);
     JL_GC_POP();
     return ii;
 }
@@ -1142,40 +1167,40 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
 static jl_value_t *intersect_unionall(jl_value_t *t, jl_unionall_t *u, jl_stenv_t *e, int8_t R, int param)
 {
     jl_value_t *res=NULL, *res2=NULL, *save=NULL, *save2=NULL;
-    int8_t *buf=NULL, *buf2=NULL;
+    jl_savedenv_t se, se2;
     jl_varbinding_t vb = { u->var, u->var->lb, u->var->ub, R, NULL, 0, 0, 0, 0, e->invdepth, 0, e->vars };
     JL_GC_PUSH5(&res, &save2, &vb.lb, &vb.ub, &save);
-    save_env(e, &save, &buf);
+    save_env(e, &save, &se);
     res = intersect_unionall_(t, u, e, R, param, &vb);
     if (res != jl_bottom_type && !e->Runions.more) {
         if (vb.concrete || vb.occurs_inv>1 || (vb.occurs_inv && vb.occurs_cov)) {
-            restore_env(e, NULL, buf);
+            restore_env(e, NULL, &se);
             vb.occurs_cov = vb.occurs_inv = 0;
             vb.constraintkind = 3;
             res = intersect_unionall_(t, u, e, R, param, &vb);
         }
         else if (vb.occurs_cov) {
-            save_env(e, &save2, &buf2);
-            restore_env(e, save, buf);
+            save_env(e, &save2, &se2);
+            restore_env(e, save, &se);
             vb.occurs_cov = vb.occurs_inv = 0;
             vb.lb = u->var->lb; vb.ub = u->var->ub;
             vb.constraintkind = 2;
             res2 = intersect_unionall_(t, u, e, R, param, &vb);
             if (res2 == jl_bottom_type && !e->Runions.more) {
-                restore_env(e, save, buf);
+                restore_env(e, save, &se);
                 vb.occurs_cov = vb.occurs_inv = 0;
                 vb.lb = u->var->lb; vb.ub = u->var->ub;
                 vb.constraintkind = 1;
                 res2 = intersect_unionall_(t, u, e, R, param, &vb);
                 if (res2 == jl_bottom_type)
-                    restore_env(e, save2, buf2);
+                    restore_env(e, save2, &se2);
             }
             if (res2 != jl_bottom_type)
                 res = res2;
-            free(buf2);
+            free(se2.buf);
         }
     }
-    free(buf);
+    free(se.buf);
     JL_GC_POP();
     return res;
 }
@@ -1346,9 +1371,9 @@ static jl_value_t *intersect_invariant(jl_value_t *x, jl_value_t *y, jl_stenv_t 
         return ii;
     }
     jl_value_t *root=NULL;
-    int8_t *buf;
+    jl_savedenv_t se;
     JL_GC_PUSH2(&ii, &root);
-    save_env(e, &root, &buf);
+    save_env(e, &root, &se);
     if (!subtype_in_env(x, y, e)) {
         ii = NULL;
     }
@@ -1358,8 +1383,8 @@ static jl_value_t *intersect_invariant(jl_value_t *x, jl_value_t *y, jl_stenv_t 
             ii = NULL;
         flip_vars(e);
     }
-    restore_env(e, root, buf);
-    free(buf);
+    restore_env(e, root, &se);
+    free(se.buf);
     JL_GC_POP();
     return ii;
 }
@@ -1497,8 +1522,8 @@ static jl_value_t *intersect(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int pa
         if (jl_is_unionall(y)) {
             jl_value_t *a=NULL, *b=jl_bottom_type, *res=NULL;
             JL_GC_PUSH2(&a,&b);
-            jl_value_t *unused; int8_t *buf;
-            save_env(e, &unused, &buf);
+            jl_value_t *unused; jl_savedenv_t se;
+            save_env(e, &unused, &se);
             a = intersect_unionall(y, (jl_unionall_t*)x, e, 0, param);
             if (jl_is_unionall(a)) {
                 jl_unionall_t *ua = (jl_unionall_t*)a;
@@ -1506,12 +1531,12 @@ static jl_value_t *intersect(jl_value_t *x, jl_value_t *y, jl_stenv_t *e, int pa
                     jl_unionall_t *ub = (jl_unionall_t*)ua->body;
                     if (jl_has_typevar(ub->var->ub, ua->var) ||
                         jl_has_typevar(ub->var->lb, ua->var)) {
-                        restore_env(e, NULL, buf); // restore counts
+                        restore_env(e, NULL, &se); // restore counts
                         b = intersect_unionall(x, (jl_unionall_t*)y, e, 1, param);
                     }
                 }
             }
-            free(buf);
+            free(se.buf);
             if (!jl_has_free_typevars(a) && !jl_has_free_typevars(b)) {
                 if (jl_subtype(a, b))
                     res = b;
